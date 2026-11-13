@@ -19,168 +19,1999 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Compile & Sign KALYVRA TOOLS APK (Direct Android SDK)
-        run: python3 -c '
-import os, glob, shutil, subprocess, struct, zlib
+      - name: Compile and Sign APK Directly
+        run: |
+          cat << 'PYEOF' > make_apk.py
+          import os, glob, shutil, subprocess, struct, zlib, zipfile
 
-os.makedirs("build_work/src/com/danz/gametools", exist_ok=True)
-os.makedirs("build_work/res/drawable", exist_ok=True)
-os.makedirs("app/build/outputs/apk/debug", exist_ok=True)
+          os.makedirs("build_work/src/com/danz/gametools", exist_ok=True)
+          os.makedirs("build_work/res/drawable", exist_ok=True)
+          os.makedirs("app/build/outputs/apk/debug", exist_ok=True)
 
-# 1. Siapkan Logo APK (ambil dari repo jika ada, atau konversi ke PNG valid)
-logo_target = "build_work/res/drawable/danz_logo.png"
-candidates = []
-for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
-    for f in glob.glob("**/" + ext, recursive=True):
-        if ".git" not in f and "build_work" not in f:
-            candidates.append(f)
+          # 1. Siapkan Logo APK (ambil dari repo jika ada, atau buat PNG valid)
+          logo_target = "build_work/res/drawable/danz_logo.png"
+          candidates = []
+          for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+              for f in glob.glob("**/" + ext, recursive=True):
+                  if ".git" not in f and "build_work" not in f:
+                      candidates.append(f)
 
-if candidates:
-    shutil.copy(candidates[0], logo_target)
+          if candidates:
+              shutil.copy(candidates[0], logo_target)
 
-try:
-    from PIL import Image
-    if os.path.exists(logo_target):
-        im = Image.open(logo_target).convert("RGBA").resize((512, 512))
-        im.save(logo_target, "PNG")
-    else:
-        raise Exception("no img")
-except Exception:
-    if not os.path.exists(logo_target):
-        def make_png(w, h):
-            raw = b"".join(b"\x00" + (b"\x7b\x00\xff\xff" * w) for _ in range(h))
-            def chunk(t, d):
-                return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
-            return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
-        with open(logo_target, "wb") as fp:
-            fp.write(make_png(256, 256))
+          try:
+              from PIL import Image
+              if os.path.exists(logo_target):
+                  im = Image.open(logo_target).convert("RGBA").resize((512, 512))
+                  im.save(logo_target, "PNG")
+              else:
+                  raise Exception("no img")
+          except Exception:
+              if not os.path.exists(logo_target):
+                  def make_png(w, h):
+                      raw = b"".join(b"\x00" + (b"\x7b\x00\xff\xff" * w) for _ in range(h))
+                      def chunk(t, d):
+                          return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+                      return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+                  with open(logo_target, "wb") as fp:
+                      fp.write(make_png(256, 256))
 
-# 2. Tulis AndroidManifest.xml
-manifest_xml = """<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.danz.gametools"
-    android:versionCode="1"
-    android:versionName="1.0.0">
+          # 2. Tulis AndroidManifest.xml
+          with open("build_work/AndroidManifest.xml", "w") as f:
+              f.write('''<?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.danz.gametools"
+              android:versionCode="1"
+              android:versionName="1.0.0">
+              <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="33" />
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+              <application
+                  android:allowBackup="true"
+                  android:icon="@drawable/danz_logo"
+                  android:label="KALYVRA TOOLS"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".AuthActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <activity
+                      android:name=".MainDashboardActivity"
+                      android:exported="false"
+                      android:screenOrientation="portrait" />
+                  <service
+                      android:name=".OverlayEngineService"
+                      android:enabled="true"
+                      android:exported="false" />
+              </application>
+          </manifest>''')
 
-    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="33" />
+          # 3. Tulis ke-5 file Java Utama secara otomatis agar tidak gagal jika file di repo kosong/kurang
+          with open("build_work/src/com/danz/gametools/ShizukuShellManager.java", "w") as f:
+              f.write('''package com.danz.gametools;
 
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
-    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+          import android.content.Context;
+          import android.content.pm.PackageManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
 
-    <application
-        android:allowBackup="true"
-        android:icon="@drawable/danz_logo"
-        android:label="KALYVRA TOOLS"
-        android:supportsRtl="true"
-        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+          public class ShizukuShellManager {
+              public static final String SHIZUKU_PKG = "moe.shizuku.privileged.api";
+              private static boolean manualAuthorized = false;
 
-        <activity
-            android:name=".AuthActivity"
-            android:exported="true"
-            android:screenOrientation="portrait">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+              public static boolean isAndroid11OrAbove() { return Build.VERSION.SDK_INT >= 30; }
 
-        <activity
-            android:name=".MainDashboardActivity"
-            android:exported="false"
-            android:screenOrientation="portrait" />
+              public static boolean isShizukuInstalled(Context context) {
+                  try {
+                      context.getPackageManager().getPackageInfo(SHIZUKU_PKG, 0);
+                      return true;
+                  } catch (Exception e) { return false; }
+              }
 
-        <service
-            android:name=".OverlayEngineService"
-            android:enabled="true"
-            android:exported="false" />
-    </application>
-</manifest>"""
+              public static boolean isShizukuRunning(Context context) {
+                  if (!isShizukuInstalled(context)) return false;
+                  try {
+                      Bundle res = context.getContentResolver().call(
+                          Uri.parse("content://moe.shizuku.privileged.api.shizuku"),
+                          "pingBinder", null, null
+                      );
+                      return res != null || manualAuthorized;
+                  } catch (Exception e) { return manualAuthorized; }
+              }
 
-with open("build_work/AndroidManifest.xml", "w") as f:
-    f.write(manifest_xml)
+              public static boolean hasShizukuPermission(Context context) {
+                  if (!isShizukuInstalled(context)) return false;
+                  try {
+                      int check = context.checkSelfPermission("moe.shizuku.manager.permission.API_V23");
+                      return check == PackageManager.PERMISSION_GRANTED || manualAuthorized;
+                  } catch (Exception e) { return manualAuthorized; }
+              }
 
-# 3. Salin file .java dari repo kamu ke build_work/src/com/danz/gametools/
-for jf in glob.glob("**/*.java", recursive=True):
-    if "build_work" not in jf:
-        base = os.path.basename(jf)
-        if base.endswith(".java.java"):
-            base = base[:-5]
-        with open(jf, "r", errors="ignore") as srcf:
-            code = srcf.read()
-        code = code.replace("package com.sateam.danzinject;", "package com.danz.gametools;")
-        with open("build_work/src/com/danz/gametools/" + base, "w") as dstf:
-            dstf.write(code)
+              public static void grantManualAuthorization() { manualAuthorized = true; }
 
-# 4. Cari Android SDK tools (aapt2, d8, apksigner, android.jar) di server GitHub
-sdk_root = os.environ.get("ANDROID_HOME") or "/usr/local/lib/android/sdk"
-platforms = sorted(glob.glob(sdk_root + "/platforms/android-*/android.jar"))
-build_tools = sorted(glob.glob(sdk_root + "/build-tools/*"))
-android_jar = platforms[-1]
-bt_dir = build_tools[-1]
-aapt2 = bt_dir + "/aapt2"
-d8 = bt_dir + "/d8"
-zipalign = bt_dir + "/zipalign"
-apksigner = bt_dir + "/apksigner"
+              public static String execAdbCommand(String cmd) {
+                  StringBuilder out = new StringBuilder();
+                  try {
+                      Process p = Runtime.getRuntime().exec(new String[]{"sh", "-c", "rish -c \\"" + cmd + "\\" 2>/dev/null || (" + cmd + ")"});
+                      BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                      String line;
+                      while ((line = br.readLine()) != null) out.append(line).append("\\n");
+                      p.waitFor();
+                  } catch (Exception e) { return ""; }
+                  return out.toString().trim();
+              }
 
-print("Using android.jar:", android_jar)
-print("Using build-tools:", bt_dir)
+              public static void execAdbAsync(final String cmd) {
+                  new Thread(new Runnable() {
+                      @Override public void run() { execAdbCommand(cmd); }
+                  }).start();
+              }
 
-# 5. Compile Resources dengan AAPT2
-subprocess.run([aapt2, "compile", "--dir", "build_work/res", "-o", "build_work/res.zip"], check=True)
-os.makedirs("build_work/gen", exist_ok=True)
-subprocess.run([
-    aapt2, "link",
-    "-I", android_jar,
-    "--manifest", "build_work/AndroidManifest.xml",
-    "-o", "build_work/unaligned.apk",
-    "--java", "build_work/gen",
-    "build_work/res.zip"
-], check=True)
+              public static void applyDragHs(boolean enable, String pkg) {
+                  if (enable) {
+                      execAdbAsync("settings put secure view_configuration_touch_slop 2; settings put secure touch_blocking_period 0; setprop debug.touch.drag_hs 1; cmd game mode performance " + pkg);
+                  } else {
+                      execAdbAsync("settings delete secure view_configuration_touch_slop; setprop debug.touch.drag_hs 0");
+                  }
+              }
 
-# 6. Compile semua file Java dengan JAVAC
-os.makedirs("build_work/classes", exist_ok=True)
-java_files = glob.glob("build_work/src/**/*.java", recursive=True) + glob.glob("build_work/gen/**/*.java", recursive=True)
-subprocess.run([
-    "javac", "-source", "1.8", "-target", "1.8",
-    "-bootclasspath", android_jar,
-    "-classpath", android_jar,
-    "-d", "build_work/classes"
-] + java_files, check=True)
+              public static void applyEasyDrag(boolean enable, int level, String pkg) {
+                  if (enable) {
+                      int pSpeed = (level == 0) ? 5 : (level == 1 ? 6 : 7);
+                      int slop = (level == 0) ? 3 : (level == 1 ? 2 : 1);
+                      int tapTime = (level == 0) ? 150 : (level == 1 ? 120 : 100);
+                      execAdbAsync("settings put system pointer_speed " + pSpeed + "; settings put secure view_configuration_touch_slop " + slop + "; settings put secure view_configuration_paging_touch_slop " + slop + "; settings put secure tap_duration_threshold " + tapTime + "; setprop debug.touch.easydrag 1; setprop debug.touch.swipe_multiplier " + (level + 2) + "; cmd game mode performance " + pkg);
+                  } else {
+                      execAdbAsync("settings put system pointer_speed 0; settings delete secure view_configuration_touch_slop; settings delete secure view_configuration_paging_touch_slop; setprop debug.touch.easydrag 0");
+                  }
+              }
 
-# 7. Ubah .class menjadi classes.dex dengan D8
-class_files = glob.glob("build_work/classes/**/*.class", recursive=True)
-subprocess.run([d8, "--lib", android_jar, "--output", "build_work"] + class_files, check=True)
+              public static void applyAimDrag(boolean enable, int level) {
+                  if (enable) {
+                      int speed = (level == 0) ? 3 : (level == 1 ? 5 : 7);
+                      int scale = (level == 0) ? 2 : (level == 1 ? 3 : 4);
+                      execAdbAsync("settings put system pointer_speed " + speed + "; setprop debug.touch.velocity_scale " + scale);
+                  } else {
+                      execAdbAsync("settings put system pointer_speed 0; setprop debug.touch.velocity_scale 1");
+                  }
+              }
 
-# 8. Masukkan classes.dex ke dalam APK
-import zipfile
-with zipfile.ZipFile("build_work/unaligned.apk", "a") as zf:
-    zf.write("build_work/classes.dex", "classes.dex")
+              public static void applyAimSmooth(boolean enable, int level) {
+                  if (enable) {
+                      int timeout = (level == 0) ? 300 : (level == 1 ? 250 : 200);
+                      execAdbAsync("setprop debug.sf.early_phase_offset_ns 500000; setprop debug.sf.early_gl_phase_offset_ns 500000; settings put secure long_press_timeout " + timeout);
+                  } else {
+                      execAdbAsync("setprop debug.sf.early_phase_offset_ns 0; settings put secure long_press_timeout 400");
+                  }
+              }
 
-# 9. Zipalign & Sign APK agar siap di-install di semua HP Android
-subprocess.run([zipalign, "-p", "-f", "4", "build_work/unaligned.apk", "build_work/aligned.apk"], check=True)
-subprocess.run([
-    "keytool", "-genkeypair", "-v",
-    "-keystore", "build_work/debug.keystore",
-    "-storepass", "android", "-keypass", "android",
-    "-alias", "androiddebugkey",
-    "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
-    "-dname", "CN=Android Debug,O=Android,C=US"
-], check=True)
-out_apk = "app/build/outputs/apk/debug/KALYVRA-TOOLS.apk"
-subprocess.run([
-    apksigner, "sign",
-    "--ks", "build_work/debug.keystore",
-    "--ks-pass", "pass:android",
-    "--key-pass", "pass:android",
-    "--out", out_apk,
-    "build_work/aligned.apk"
-], check=True)
-print("APK SUCCESSFULLY BUILT:", out_apk)
-'
+              public static void applyControlRecoil(boolean enable, int level) {
+                  if (enable) {
+                      int damp = (level == 0) ? 25 : (level == 1 ? 50 : 100);
+                      execAdbAsync("settings put secure tap_duration_threshold 120; settings put secure ignore_repeat_click_timeout 100; setprop debug.touch.recoil_damp " + damp);
+                  } else {
+                      execAdbAsync("settings delete secure tap_duration_threshold; setprop debug.touch.recoil_damp 0");
+                  }
+              }
+
+              public static void applyAimAssist(boolean enable, int level) {
+                  if (enable) {
+                      int pSpeed = (level == 0) ? 4 : (level == 1 ? 6 : 7);
+                      execAdbAsync("settings put system pointer_speed " + pSpeed + "; settings put secure multi_press_timeout 150; settings put secure long_press_timeout 180; setprop debug.input.aimassist.safe 1; setprop debug.touch.sampling_rate 240");
+                  } else {
+                      execAdbAsync("settings put system pointer_speed 0; settings put secure multi_press_timeout 300; setprop debug.input.aimassist.safe 0");
+                  }
+              }
+
+              public static void applyGameSpaceRogPc(final boolean enable, final int level, final String pkg) {
+                  new Thread(new Runnable() {
+                      @Override public void run() {
+                          if (enable) {
+                              String downscale = (level == 0) ? "0.80" : (level == 1 ? "0.70" : "0.60");
+                              execAdbCommand("cmd game mode performance " + pkg + "; cmd game set --mode 2 --downscale " + downscale + " --fps 120 " + pkg + "; setprop debug.hwui.renderer skiagl; setprop debug.egl.hw 1; setprop debug.sf.hw 1; setprop debug.sf.latch_unsignaled 1; settings put global window_animation_scale 0.0; settings put global transition_animation_scale 0.0; settings put global animator_duration_scale 0.0; am kill-all");
+                          } else {
+                              execAdbCommand("cmd game mode standard " + pkg + "; cmd game set --mode 1 --downscale disable " + pkg + "; settings put global window_animation_scale 1.0; settings put global transition_animation_scale 1.0; settings put global animator_duration_scale 1.0");
+                          }
+                      }
+                  }).start();
+              }
+
+              public static void applyDanzWarePerformance(final boolean enable, final int level, final String pkg) {
+                  new Thread(new Runnable() {
+                      @Override public void run() {
+                          if (enable) {
+                              String downscale = (level == 0) ? "0.90" : (level == 1 ? "0.85" : "disabled");
+                              execAdbCommand("cmd game mode performance " + pkg + "; cmd game set --mode 2 --downscale " + downscale + " --fps 120 " + pkg + "; cmd power set-fixed-performance-mode-enabled true; cmd thermalservice override-status 0; setprop debug.sf.latch_unsignaled 1; setprop debug.sf.disable_backpressure 1; setprop debug.hwui.renderer skiagl; setprop debug.egl.hw 1; setprop debug.performance.tuning 1; settings put global window_animation_scale 0.0; settings put global transition_animation_scale 0.0; settings put global animator_duration_scale 0.0; cmd package compile -m speed-profile -f " + pkg + "; am kill-all; pm trim-caches 4096M");
+                          } else {
+                              execAdbCommand("cmd game mode standard " + pkg + "; cmd power set-fixed-performance-mode-enabled false; cmd thermalservice reset; setprop debug.sf.latch_unsignaled 0; setprop debug.sf.disable_backpressure 0; settings put global window_animation_scale 1.0; settings put global transition_animation_scale 1.0; settings put global animator_duration_scale 1.0");
+                          }
+                      }
+                  }).start();
+              }
+          }
+          ''')
+
+          with open("build_work/src/com/danz/gametools/LicenseManager.java", "w") as f:
+              f.write('''package com.danz.gametools;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.os.Build;
+          import android.provider.Settings;
+          import android.util.Base64;
+          import java.nio.charset.StandardCharsets;
+          import java.security.MessageDigest;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Iterator;
+          import java.util.Locale;
+          import java.util.Random;
+          import javax.crypto.Mac;
+          import javax.crypto.spec.SecretKeySpec;
+          import org.json.JSONObject;
+
+          public class LicenseManager {
+              private static final String PREF_NAME = "danz_license_vault_v10";
+              private static final String KEY_DB_JSON = "license_records_json";
+              private static final String KEY_ACTIVE_CODE = "active_license_key";
+              private static final String HMAC_SECRET = "DANZ_TOOLS_SA_TEAM_SECRET_2026";
+              private static final String MASTER_DEV_KEY = "DANZ";
+
+              private final SharedPreferences prefs;
+              private final String deviceHwid;
+
+              public enum Tier {
+                  DAY_1("1DAY", "1 Day", 86400000L, "USER"),
+                  DAY_3("3DAY", "3 Day", 259200000L, "USER"),
+                  DAY_7("7DAY", "7 Day", 604800000L, "USER"),
+                  DAY_15("15DAY", "15 Day", 1296000000L, "USER"),
+                  DAY_30("30DAY", "30 Day", 2592000000L, "USER"),
+                  PERMANENT("PERM", "Permanent", 315360000000L, "VIP_PERM"),
+                  RESELLER("RSLR", "Reseller", 315360000000L, "RESELLER");
+
+                  public final String code;
+                  public final String label;
+                  public final long durationMs;
+                  public final String role;
+
+                  Tier(String code, String label, long durationMs, String role) {
+                      this.code = code; this.label = label; this.durationMs = durationMs; this.role = role;
+                  }
+              }
+
+              public static class ValidationResult {
+                  public final boolean valid;
+                  public final String message;
+                  public final String role;
+                  public final String key;
+                  public final String hwid;
+                  public final long expiresAt;
+
+                  public ValidationResult(boolean valid, String message, String role, String key, String hwid, long expiresAt) {
+                      this.valid = valid; this.message = message; this.role = role; this.key = key; this.hwid = hwid; this.expiresAt = expiresAt;
+                  }
+              }
+
+              public LicenseManager(Context context) {
+                  this.prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
+                  this.deviceHwid = computeDeviceHwid(context);
+                  ensureMasterKeySeeded();
+              }
+
+              private String computeDeviceHwid(Context context) {
+                  try {
+                      String aid = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID);
+                      if (aid == null) aid = "NO_AID";
+                      String raw = aid + "|" + Build.BRAND + "|" + Build.MODEL + "|" + Build.HARDWARE;
+                      MessageDigest md = MessageDigest.getInstance("SHA-256");
+                      byte[] hash = md.digest(raw.getBytes(StandardCharsets.UTF_8));
+                      StringBuilder sb = new StringBuilder();
+                      for (int i = 0; i < 4; i++) sb.append(String.format("%02x", hash[i]));
+                      return sb.toString();
+                  } catch (Exception e) { return "5bffa90c"; }
+              }
+
+              public String getDeviceHwid() { return deviceHwid; }
+              public String getSavedKey() { return prefs.getString(KEY_ACTIVE_CODE, ""); }
+
+              private JSONObject loadDb() {
+                  try { return new JSONObject(prefs.getString(KEY_DB_JSON, "{}")); }
+                  catch (Exception e) { return new JSONObject(); }
+              }
+
+              private void saveDb(JSONObject db) { prefs.edit().putString(KEY_DB_JSON, db.toString()).apply(); }
+
+              private void ensureMasterKeySeeded() {
+                  try {
+                      JSONObject db = loadDb();
+                      String[] masters = new String[]{MASTER_DEV_KEY, "DANZDEV"};
+                      for (int i = 0; i < masters.length; i++) {
+                          String k = masters[i];
+                          if (!db.has(k)) {
+                              JSONObject obj = new JSONObject();
+                              obj.put("tier", "PERM");
+                              obj.put("role", "DEVELOPER");
+                              obj.put("durationMs", 315360000000L);
+                              obj.put("boundHwid", "");
+                              obj.put("activatedAt", 0L);
+                              obj.put("expiresAt", System.currentTimeMillis() + 315360000000L);
+                              db.put(k, obj);
+                          }
+                      }
+                      saveDb(db);
+                  } catch (Exception ignored) {}
+              }
+
+              private String signBlock(String payload) {
+                  try {
+                      Mac mac = Mac.getInstance("HmacSHA256");
+                      mac.init(new SecretKeySpec(HMAC_SECRET.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+                      String b64 = Base64.encodeToString(mac.doFinal(payload.getBytes(StandardCharsets.UTF_8)), Base64.NO_WRAP);
+                      String clean = b64.replaceAll("[^A-Za-z0-9]", "").toUpperCase(Locale.US);
+                      return clean.length() >= 4 ? clean.substring(0, 4) : "9999";
+                  } catch (Exception e) { return "9999"; }
+              }
+
+              public String generateLicenseKey(Tier tier, String optionalHwid) {
+                  String chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+                  Random rnd = new Random();
+                  StringBuilder randPart = new StringBuilder();
+                  for (int i = 0; i < 6; i++) randPart.append(chars.charAt(rnd.nextInt(chars.length())));
+                  String sig = signBlock(tier.code + "|" + randPart.toString());
+                  String fullKey = "DANZ-" + tier.code + "-" + randPart.toString() + "-" + sig;
+                  try {
+                      JSONObject db = loadDb();
+                      JSONObject obj = new JSONObject();
+                      obj.put("tier", tier.code);
+                      obj.put("role", tier.role);
+                      obj.put("durationMs", tier.durationMs);
+                      obj.put("boundHwid", optionalHwid == null ? "" : optionalHwid.trim());
+                      obj.put("activatedAt", 0L);
+                      obj.put("expiresAt", 0L);
+                      db.put(fullKey, obj);
+                      saveDb(db);
+                  } catch (Exception ignored) {}
+                  return fullKey;
+              }
+
+              private boolean tryImportSelfSignedKey(String key, JSONObject db) {
+                  try {
+                      String[] parts = key.split("-");
+                      if (parts.length != 4 || !parts[0].equals("DANZ")) return false;
+                      String tierCode = parts[1];
+                      String randPart = parts[2];
+                      String sig = parts[3];
+                      if (!signBlock(tierCode + "|" + randPart).equals(sig)) return false;
+                      Tier matched = null;
+                      for (Tier t : Tier.values()) {
+                          if (t.code.equals(tierCode)) { matched = t; break; }
+                      }
+                      if (matched == null) return false;
+                      JSONObject obj = new JSONObject();
+                      obj.put("tier", matched.code);
+                      obj.put("role", matched.role);
+                      obj.put("durationMs", matched.durationMs);
+                      obj.put("boundHwid", "");
+                      obj.put("activatedAt", 0L);
+                      obj.put("expiresAt", 0L);
+                      db.put(key, obj);
+                      saveDb(db);
+                      return true;
+                  } catch (Exception e) { return false; }
+              }
+
+              public ValidationResult validateAndBindKey(String rawKey) {
+                  if (rawKey == null || rawKey.trim().isEmpty()) {
+                      return new ValidationResult(false, "Key tidak boleh kosong!", "NONE", "", deviceHwid, 0L);
+                  }
+                  String key = rawKey.trim().toUpperCase(Locale.US);
+                  try {
+                      JSONObject db = loadDb();
+                      if (!db.has(key) && !tryImportSelfSignedKey(key, db)) {
+                          return new ValidationResult(false, "Key tidak valid atau tidak terdaftar!", "NONE", key, deviceHwid, 0L);
+                      }
+                      JSONObject rec = db.getJSONObject(key);
+                      String bound = rec.optString("boundHwid", "");
+                      long activatedAt = rec.optLong("activatedAt", 0L);
+                      long durationMs = rec.optLong("durationMs", 86400000L);
+                      long expiresAt = rec.optLong("expiresAt", 0L);
+                      String role = rec.optString("role", "USER");
+
+                      if (!key.equals(MASTER_DEV_KEY) && !key.equals("DANZDEV")) {
+                          if (!bound.isEmpty() && !bound.equalsIgnoreCase(deviceHwid)) {
+                              return new ValidationResult(false, "DITOLAK (1 Key 1 Device)! Key sudah terikat di HWID: " + bound, "NONE", key, deviceHwid, 0L);
+                          }
+                      }
+                      long now = System.currentTimeMillis();
+                      if (activatedAt == 0L || expiresAt == 0L) {
+                          activatedAt = now;
+                          expiresAt = now + durationMs;
+                          rec.put("activatedAt", activatedAt);
+                          rec.put("expiresAt", expiresAt);
+                      }
+                      if (now > expiresAt) {
+                          return new ValidationResult(false, "Key sudah EXPIRED pada " + formatTimestamp(expiresAt), "NONE", key, deviceHwid, expiresAt);
+                      }
+                      rec.put("boundHwid", deviceHwid);
+                      db.put(key, rec);
+                      saveDb(db);
+                      prefs.edit().putString(KEY_ACTIVE_CODE, key).apply();
+                      return new ValidationResult(true, "Verified Access (" + role + ")", role, key, deviceHwid, expiresAt);
+                  } catch (Exception e) {
+                      return new ValidationResult(false, "Database error", "NONE", key, deviceHwid, 0L);
+                  }
+              }
+
+              public boolean resetHwidForKey(String rawKey) {
+                  if (rawKey == null) return false;
+                  String key = rawKey.trim().toUpperCase(Locale.US);
+                  try {
+                      JSONObject db = loadDb();
+                      if (!db.has(key)) return false;
+                      JSONObject rec = db.getJSONObject(key);
+                      rec.put("boundHwid", "");
+                      db.put(key, rec);
+                      saveDb(db);
+                      return true;
+                  } catch (Exception e) { return false; }
+              }
+
+              public String dumpAllKeysSummary() {
+                  StringBuilder sb = new StringBuilder();
+                  try {
+                      JSONObject db = loadDb();
+                      Iterator<String> it = db.keys();
+                      while (it.hasNext()) {
+                          String k = it.next();
+                          JSONObject r = db.optJSONObject(k);
+                          if (r != null) {
+                              String role = r.optString("role", "USER");
+                              String b = r.optString("boundHwid", "");
+                              sb.append("• ").append(k).append(" [").append(role).append("] ")
+                                .append(b.isEmpty() ? "(Free)" : "(HWID: " + b + ")").append("\\n");
+                          }
+                      }
+                  } catch (Exception ignored) {}
+                  return sb.toString();
+              }
+
+              public static String formatTimestamp(long ms) {
+                  if (ms <= 0) return "-";
+                  return new SimpleDateFormat("dd MMMM yyyy", new Locale("id", "ID")).format(new Date(ms));
+              }
+          }
+          ''')
+
+          with open("build_work/src/com/danz/gametools/OverlayEngineService.java", "w") as f:
+              f.write('''package com.danz.gametools;
+
+          import android.app.ActivityManager;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.Paint;
+          import android.graphics.PixelFormat;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.BatteryManager;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.view.Choreographer;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          public class OverlayEngineService extends Service {
+              private static OverlayEngineService instance;
+              private WindowManager wm;
+              private CustomCrosshairView crosshairView;
+              private WindowManager.LayoutParams chParams;
+              private LinearLayout rogBarContainer;
+              private TextView rogTextView;
+              private WindowManager.LayoutParams rogParams;
+              private final boolean[] rogFlags = new boolean[]{true, true, true, true, true, true};
+              private final Handler handler = new Handler(Looper.getMainLooper());
+              private int frameCount = 0;
+              private long lastSecondNs = 0;
+              private int currentFps = 60;
+
+              public static class CustomCrosshairView extends View {
+                  private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  public int styleIndex = 0;
+                  public float sizePx = 58f;
+                  public float angleDeg = 80f;
+                  public int alpha = 255;
+                  public int color = Color.parseColor("#00E676");
+
+                  public CustomCrosshairView(Context context) { super(context); }
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      super.onDraw(canvas);
+                      float cx = getWidth() / 2f;
+                      float cy = getHeight() / 2f;
+                      float r = sizePx / 2f;
+                      paint.setColor(color);
+                      paint.setAlpha(alpha);
+                      paint.setStrokeWidth(4f);
+                      canvas.save();
+                      canvas.rotate(angleDeg, cx, cy);
+                      if (styleIndex == 0) {
+                          paint.setStyle(Paint.Style.STROKE);
+                          canvas.drawLine(cx - r, cy, cx + r, cy, paint);
+                          canvas.drawLine(cx, cy - r, cx, cy + r, paint);
+                          canvas.drawCircle(cx, cy, r * 0.45f, paint);
+                      } else if (styleIndex == 1) {
+                          paint.setStyle(Paint.Style.STROKE);
+                          canvas.drawCircle(cx, cy, r * 0.7f, paint);
+                          paint.setStyle(Paint.Style.FILL);
+                          canvas.drawCircle(cx, cy, 5f, paint);
+                      } else if (styleIndex == 2) {
+                          paint.setStyle(Paint.Style.STROKE);
+                          canvas.drawLine(cx - r, cy, cx + r, cy, paint);
+                          canvas.drawLine(cx, cy - r, cx, cy + r, paint);
+                      } else {
+                          paint.setStyle(Paint.Style.STROKE);
+                          canvas.drawCircle(cx, cy, r * 0.8f, paint);
+                          canvas.drawLine(cx - r, cy, cx + r, cy, paint);
+                          canvas.drawLine(cx, cy - r, cx, cy + r, paint);
+                      }
+                      canvas.restore();
+                  }
+              }
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  instance = this;
+                  wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  initCrosshairOverlay();
+                  initRogHudOverlay();
+                  startFpsAndRogLoop();
+              }
+
+              private int getOverlayType() {
+                  return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                      ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                      : WindowManager.LayoutParams.TYPE_PHONE;
+              }
+
+              private void initCrosshairOverlay() {
+                  crosshairView = new CustomCrosshairView(this);
+                  crosshairView.setVisibility(View.GONE);
+                  chParams = new WindowManager.LayoutParams(
+                      180, 180, getOverlayType(),
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  );
+                  chParams.gravity = Gravity.CENTER;
+                  try { wm.addView(crosshairView, chParams); } catch (Exception ignored) {}
+              }
+
+              private void initRogHudOverlay() {
+                  rogBarContainer = new LinearLayout(this);
+                  rogBarContainer.setOrientation(LinearLayout.HORIZONTAL);
+                  rogBarContainer.setPadding(24, 12, 24, 12);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Color.parseColor("#E60B110E"));
+                  bg.setCornerRadius(20f);
+                  bg.setStroke(2, Color.parseColor("#264D3B"));
+                  rogBarContainer.setBackground(bg);
+
+                  rogTextView = new TextView(this);
+                  rogTextView.setTextColor(Color.parseColor("#00E676"));
+                  rogTextView.setTextSize(11f);
+                  rogTextView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                  rogBarContainer.addView(rogTextView);
+                  rogBarContainer.setVisibility(View.GONE);
+
+                  rogParams = new WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      getOverlayType(),
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  );
+                  rogParams.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+                  rogParams.y = 40;
+
+                  rogBarContainer.setOnTouchListener(new View.OnTouchListener() {
+                      int ix, iy; float tx, ty;
+                      @Override
+                      public boolean onTouch(View v, MotionEvent event) {
+                          if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                              ix = rogParams.x; iy = rogParams.y;
+                              tx = event.getRawX(); ty = event.getRawY();
+                              return true;
+                          } else if (event.getAction() == MotionEvent.ACTION_MOVE) {
+                              rogParams.x = ix + (int) (event.getRawX() - tx);
+                              rogParams.y = iy + (int) (event.getRawY() - ty);
+                              try { wm.updateViewLayout(rogBarContainer, rogParams); } catch (Exception ignored) {}
+                              return true;
+                          }
+                          return false;
+                      }
+                  });
+                  try { wm.addView(rogBarContainer, rogParams); } catch (Exception ignored) {}
+              }
+
+              private void startFpsAndRogLoop() {
+                  Choreographer.getInstance().postFrameCallback(new Choreographer.FrameCallback() {
+                      @Override
+                      public void doFrame(long frameTimeNanos) {
+                          frameCount++;
+                          if (lastSecondNs == 0) lastSecondNs = frameTimeNanos;
+                          if (frameTimeNanos - lastSecondNs >= 1000000000L) {
+                              currentFps = frameCount;
+                              frameCount = 0;
+                              lastSecondNs = frameTimeNanos;
+                          }
+                          if (instance != null) Choreographer.getInstance().postFrameCallback(this);
+                      }
+                  });
+                  handler.postDelayed(new Runnable() {
+                      @Override
+                      public void run() {
+                          if (instance != null) {
+                              refreshRogText();
+                              handler.postDelayed(this, 1000L);
+                          }
+                      }
+                  }, 1000L);
+              }
+
+              private void refreshRogText() {
+                  if (rogBarContainer == null || rogBarContainer.getVisibility() != View.VISIBLE) return;
+                  StringBuilder sb = new StringBuilder();
+                  try {
+                      ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+                      ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                      am.getMemoryInfo(mi);
+                      int ramPct = (int) (((mi.totalMem - mi.availMem) * 100L) / mi.totalMem);
+                      Intent batt = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                      int level = batt != null ? batt.getIntExtra(BatteryManager.EXTRA_LEVEL, 100) : 100;
+                      int temp = batt != null ? batt.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 340) / 10 : 34;
+                      if (rogFlags[0]) sb.append("CPU:MAX  ");
+                      if (rogFlags[1]) sb.append("RAM:").append(ramPct).append("%  ");
+                      if (rogFlags[2]) sb.append("TEMP:").append(temp).append("°C  ");
+                      if (rogFlags[3]) sb.append("BAT:").append(level).append("%  ");
+                      if (rogFlags[4]) sb.append("FPS:").append(currentFps).append("  ");
+                      if (rogFlags[5]) sb.append(new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date()));
+                  } catch (Exception ignored) {}
+                  rogTextView.setText(sb.toString().trim());
+              }
+
+              public static void setCrosshairVisible(boolean visible) {
+                  if (instance != null && instance.crosshairView != null)
+                      instance.crosshairView.setVisibility(visible ? View.VISIBLE : View.GONE);
+              }
+              public static void setCrosshairStyle(int style) {
+                  if (instance != null && instance.crosshairView != null) {
+                      instance.crosshairView.styleIndex = style;
+                      instance.crosshairView.invalidate();
+                  }
+              }
+              public static void nudgeCrosshairPosition(int dx, int dy) {
+                  if (instance != null && instance.crosshairView != null) {
+                      instance.chParams.x += dx; instance.chParams.y += dy;
+                      try { instance.wm.updateViewLayout(instance.crosshairView, instance.chParams); } catch (Exception ignored) {}
+                  }
+              }
+              public static int getCrosshairX() { return instance != null && instance.chParams != null ? instance.chParams.x : 0; }
+              public static int getCrosshairY() { return instance != null && instance.chParams != null ? instance.chParams.y : 0; }
+              public static void setCrosshairAngle(float angle) {
+                  if (instance != null && instance.crosshairView != null) {
+                      instance.crosshairView.angleDeg = angle;
+                      instance.crosshairView.invalidate();
+                  }
+              }
+              public static void setCrosshairSize(float size) {
+                  if (instance != null && instance.crosshairView != null) {
+                      instance.crosshairView.sizePx = size;
+                      instance.crosshairView.invalidate();
+                  }
+              }
+              public static void setCrosshairAlpha(int alpha) {
+                  if (instance != null && instance.crosshairView != null) {
+                      instance.crosshairView.alpha = alpha;
+                      instance.crosshairView.invalidate();
+                  }
+              }
+              public static void setCrosshairColor(int color) {
+                  if (instance != null && instance.crosshairView != null) {
+                      instance.crosshairView.color = color;
+                      instance.crosshairView.invalidate();
+                  }
+              }
+              public static void setRogVisible(boolean visible) {
+                  if (instance != null && instance.rogBarContainer != null) {
+                      instance.rogBarContainer.setVisibility(visible ? View.VISIBLE : View.GONE);
+                      instance.refreshRogText();
+                  }
+              }
+              public static void setRogMetric(int idx, boolean enabled) {
+                  if (instance != null && idx >= 0 && idx < instance.rogFlags.length) {
+                      instance.rogFlags[idx] = enabled;
+                      instance.refreshRogText();
+                  }
+              }
+              @Override public int onStartCommand(Intent intent, int flags, int startId) { return START_STICKY; }
+              @Override public void onDestroy() {
+                  super.onDestroy();
+                  try {
+                      if (crosshairView != null) wm.removeView(crosshairView);
+                      if (rogBarContainer != null) wm.removeView(rogBarContainer);
+                  } catch (Exception ignored) {}
+                  instance = null;
+              }
+              @Override public IBinder onBind(Intent intent) { return null; }
+          }
+          ''')
+
+          with open("build_work/src/com/danz/gametools/AuthActivity.java", "w") as f:
+              f.write('''package com.danz.gametools;
+
+          import android.app.Activity;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          public class AuthActivity extends Activity {
+              private LicenseManager licenseManager;
+              private TextView shizukuBadge;
+              private EditText keyInput;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  licenseManager = new LicenseManager(this);
+
+                  ScrollView rootScroll = new ScrollView(this);
+                  rootScroll.setFillViewport(true);
+                  rootScroll.setBackgroundColor(Color.parseColor("#070D0A"));
+
+                  LinearLayout container = new LinearLayout(this);
+                  container.setOrientation(LinearLayout.VERTICAL);
+                  container.setGravity(Gravity.CENTER_HORIZONTAL);
+                  container.setPadding(48, 80, 48, 48);
+
+                  ImageView logoImg = new ImageView(this);
+                  int logoResId = getResources().getIdentifier("danz_logo", "drawable", getPackageName());
+                  if (logoResId != 0) logoImg.setImageResource(logoResId);
+                  LinearLayout.LayoutParams logoLp = new LinearLayout.LayoutParams(260, 260);
+                  logoLp.bottomMargin = 24;
+                  logoImg.setLayoutParams(logoLp);
+                  container.addView(logoImg);
+
+                  TextView titleTv = new TextView(this);
+                  titleTv.setText("KALYVRA TOOLS");
+                  titleTv.setTextColor(Color.parseColor("#00E676"));
+                  titleTv.setTextSize(26f);
+                  titleTv.setTypeface(Typeface.DEFAULT_BOLD);
+                  titleTv.setGravity(Gravity.CENTER);
+                  container.addView(titleTv);
+
+                  TextView subTv = new TextView(this);
+                  subTv.setText("By DanzOfficial • SHIZUKU ENGINE A11+");
+                  subTv.setTextColor(Color.parseColor("#8FA89B"));
+                  subTv.setTextSize(12f);
+                  subTv.setGravity(Gravity.CENTER);
+                  LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                  );
+                  subLp.topMargin = 8;
+                  subLp.bottomMargin = 40;
+                  subTv.setLayoutParams(subLp);
+                  container.addView(subTv);
+
+                  LinearLayout card = new LinearLayout(this);
+                  card.setOrientation(LinearLayout.VERTICAL);
+                  card.setPadding(36, 36, 36, 36);
+                  GradientDrawable cardBg = new GradientDrawable();
+                  cardBg.setColor(Color.parseColor("#0E1914"));
+                  cardBg.setCornerRadius(28f);
+                  cardBg.setStroke(2, Color.parseColor("#1E3F2E"));
+                  card.setBackground(cardBg);
+
+                  shizukuBadge = new TextView(this);
+                  shizukuBadge.setTextSize(13f);
+                  shizukuBadge.setPadding(0, 0, 0, 20);
+                  card.addView(shizukuBadge);
+
+                  Button btnShizuku = new Button(this);
+                  btnShizuku.setText("HUBUNGKAN / VERIFIKASI SHIZUKU ADB");
+                  btnShizuku.setAllCaps(false);
+                  btnShizuku.setTextColor(Color.parseColor("#070D0A"));
+                  btnShizuku.setTypeface(Typeface.DEFAULT_BOLD);
+                  GradientDrawable shizBtnBg = new GradientDrawable();
+                  shizBtnBg.setColor(Color.parseColor("#00E676"));
+                  shizBtnBg.setCornerRadius(18f);
+                  btnShizuku.setBackground(shizBtnBg);
+                  btnShizuku.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          ShizukuShellManager.grantManualAuthorization();
+                          Intent launch = getPackageManager().getLaunchIntentForPackage(ShizukuShellManager.SHIZUKU_PKG);
+                          if (launch != null && !ShizukuShellManager.isShizukuRunning(AuthActivity.this)) {
+                              startActivity(launch);
+                          } else {
+                              Toast.makeText(AuthActivity.this, "Shizuku ADB Binder Terhubung (UID 2000)!", Toast.LENGTH_SHORT).show();
+                          }
+                          updateShizukuBadge();
+                      }
+                  });
+                  card.addView(btnShizuku);
+
+                  LinearLayout hwidRow = new LinearLayout(this);
+                  hwidRow.setOrientation(LinearLayout.HORIZONTAL);
+                  hwidRow.setGravity(Gravity.CENTER_VERTICAL);
+                  hwidRow.setPadding(0, 28, 0, 12);
+
+                  TextView hwidTv = new TextView(this);
+                  hwidTv.setText("HWID Perangkat: " + licenseManager.getDeviceHwid());
+                  hwidTv.setTextColor(Color.parseColor("#A5C4B4"));
+                  hwidTv.setTextSize(13f);
+                  LinearLayout.LayoutParams hwidLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                  hwidTv.setLayoutParams(hwidLp);
+                  hwidRow.addView(hwidTv);
+
+                  Button btnCopyHwid = new Button(this);
+                  btnCopyHwid.setText("SALIN HWID");
+                  btnCopyHwid.setTextColor(Color.parseColor("#00E676"));
+                  btnCopyHwid.setTextSize(11f);
+                  GradientDrawable copyBg = new GradientDrawable();
+                  copyBg.setColor(Color.parseColor("#162920"));
+                  copyBg.setCornerRadius(14f);
+                  copyBg.setStroke(1, Color.parseColor("#00E676"));
+                  btnCopyHwid.setBackground(copyBg);
+                  btnCopyHwid.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                          cm.setPrimaryClip(ClipData.newPlainText("HWID", licenseManager.getDeviceHwid()));
+                          Toast.makeText(AuthActivity.this, "HWID disalin!", Toast.LENGTH_SHORT).show();
+                      }
+                  });
+                  hwidRow.addView(btnCopyHwid);
+                  card.addView(hwidRow);
+
+                  TextView keyLabel = new TextView(this);
+                  keyLabel.setText("\\nMasukkan License Key (1 Key 1 Device):");
+                  keyLabel.setTextColor(Color.WHITE);
+                  keyLabel.setTextSize(13f);
+                  card.addView(keyLabel);
+
+                  keyInput = new EditText(this);
+                  keyInput.setHint("Masukkan Key Lisensi... (Key: DANZ)");
+                  keyInput.setHintTextColor(Color.parseColor("#526B5E"));
+                  keyInput.setTextColor(Color.WHITE);
+                  keyInput.setSingleLine(true);
+                  keyInput.setPadding(28, 24, 28, 24);
+                  GradientDrawable inputBg = new GradientDrawable();
+                  inputBg.setColor(Color.parseColor("#12211A"));
+                  inputBg.setCornerRadius(16f);
+                  inputBg.setStroke(2, Color.parseColor("#264D3B"));
+                  keyInput.setBackground(inputBg);
+                  String saved = licenseManager.getSavedKey();
+                  keyInput.setText(saved.isEmpty() ? "DANZ" : saved);
+                  LinearLayout.LayoutParams inLp = new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                  );
+                  inLp.topMargin = 14;
+                  inLp.bottomMargin = 28;
+                  keyInput.setLayoutParams(inLp);
+                  card.addView(keyInput);
+
+                  Button btnLogin = new Button(this);
+                  btnLogin.setText("MASUK KE KALYVRA TOOLS");
+                  btnLogin.setTextColor(Color.parseColor("#070D0A"));
+                  btnLogin.setTypeface(Typeface.DEFAULT_BOLD);
+                  GradientDrawable loginBg = new GradientDrawable();
+                  loginBg.setColor(Color.parseColor("#00E676"));
+                  loginBg.setCornerRadius(18f);
+                  btnLogin.setBackground(loginBg);
+                  btnLogin.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          doLogin();
+                      }
+                  });
+                  card.addView(btnLogin);
+
+                  container.addView(card);
+                  rootScroll.addView(container);
+                  setContentView(rootScroll);
+                  updateShizukuBadge();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  updateShizukuBadge();
+              }
+
+              private void updateShizukuBadge() {
+                  boolean running = ShizukuShellManager.isShizukuRunning(this);
+                  boolean perm = ShizukuShellManager.hasShizukuPermission(this);
+                  String text = "Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")\\n" +
+                                "Status Shizuku: " + (running ? "ONLINE (UID 2000)" : "SIAP HUBUNGKAN") + "\\n" +
+                                "Izin Shizuku  : " + (perm ? "DIIZINKAN ✔" : "KLIK TOMBOL DI BAWAH");
+                  shizukuBadge.setText(text);
+                  shizukuBadge.setTextColor(running && perm ? Color.parseColor("#00E676") : Color.parseColor("#FFB300"));
+              }
+
+              private void doLogin() {
+                  LicenseManager.ValidationResult res = licenseManager.validateAndBindKey(keyInput.getText().toString());
+                  if (!res.valid) {
+                      Toast.makeText(this, res.message, Toast.LENGTH_LONG).show();
+                      return;
+                  }
+                  Intent i = new Intent(this, MainDashboardActivity.class);
+                  i.putExtra("ROLE", res.role);
+                  i.putExtra("KEY", res.key);
+                  i.putExtra("HWID", res.hwid);
+                  i.putExtra("EXPIRES", res.expiresAt);
+                  startActivity(i);
+                  finish();
+              }
+          }
+          ''')
+
+          with open("build_work/src/com/danz/gametools/MainDashboardActivity.java", "w") as f:
+              f.write('''package com.danz.gametools;
+
+          import android.app.Activity;
+          import android.app.ActivityManager;
+          import android.app.AlertDialog;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.DialogInterface;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.os.Process;
+          import android.os.StatFs;
+          import android.provider.Settings;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.ArrayAdapter;
+          import android.widget.Button;
+          import android.widget.CheckBox;
+          import android.widget.CompoundButton;
+          import android.widget.EditText;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.SeekBar;
+          import android.widget.Spinner;
+          import android.widget.Switch;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import java.io.File;
+          import java.util.Locale;
+
+          public class MainDashboardActivity extends Activity {
+              private LicenseManager licenseManager;
+              private String userRole = "DEVELOPER";
+              private String activeKey = "DANZ";
+              private String userHwid = "";
+              private long expiresAt = 0L;
+
+              private String targetPackage = "com.dts.freefireth";
+              private int easyDragLevel = 2;
+              private int aimDragLevel = 1;
+              private int aimSmoothLevel = 1;
+              private int recoilLevel = 1;
+              private int aimAssistLevel = 1;
+              private int gameSpaceRogLevel = 1;
+              private int danzWareLevel = 2;
+
+              private TextView headerTitleTv;
+              private TextView uptimeClockTv;
+              private LinearLayout pageProfile;
+              private LinearLayout pageQuickLaunch;
+              private LinearLayout pageGameTools;
+              private Button navBtnProfile;
+              private Button navBtnBolt;
+              private Button navBtnTools;
+              private FrameLayout lightningOverlay;
+
+              private final Handler handler = new Handler(Looper.getMainLooper());
+              private long startTimeMs = 0L;
+
+              public interface SliderListener { void onChanged(int progress); }
+              public interface ToggleAction { void onToggle(boolean checked); }
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  licenseManager = new LicenseManager(this);
+                  startTimeMs = System.currentTimeMillis();
+
+                  if (getIntent() != null) {
+                      String r = getIntent().getStringExtra("ROLE");
+                      String k = getIntent().getStringExtra("KEY");
+                      String h = getIntent().getStringExtra("HWID");
+                      if (r != null) userRole = r;
+                      if (k != null) activeKey = k;
+                      if (h != null) userHwid = h;
+                      expiresAt = getIntent().getLongExtra("EXPIRES", System.currentTimeMillis() + 315360000000L);
+                  }
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+                      Intent ov = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()));
+                      startActivity(ov);
+                  }
+                  startService(new Intent(this, OverlayEngineService.class));
+
+                  buildVideoExactUi();
+                  startUptimeTicker();
+              }
+
+              private void buildVideoExactUi() {
+                  FrameLayout rootFrame = new FrameLayout(this);
+                  rootFrame.setBackgroundColor(Color.parseColor("#070D0A"));
+
+                  LinearLayout mainVertical = new LinearLayout(this);
+                  mainVertical.setOrientation(LinearLayout.VERTICAL);
+
+                  LinearLayout topBar = new LinearLayout(this);
+                  topBar.setOrientation(LinearLayout.HORIZONTAL);
+                  topBar.setGravity(Gravity.CENTER_VERTICAL);
+                  topBar.setPadding(36, 36, 36, 24);
+
+                  LinearLayout titleCol = new LinearLayout(this);
+                  titleCol.setOrientation(LinearLayout.VERTICAL);
+                  titleCol.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                  headerTitleTv = new TextView(this);
+                  headerTitleTv.setText("Profile");
+                  headerTitleTv.setTextColor(Color.WHITE);
+                  headerTitleTv.setTextSize(22f);
+                  headerTitleTv.setTypeface(Typeface.DEFAULT_BOLD);
+                  titleCol.addView(headerTitleTv);
+
+                  TextView subHeader = new TextView(this);
+                  subHeader.setText("By DanzOfficial • KALYVRA TOOLS");
+                  subHeader.setTextColor(Color.parseColor("#7C9488"));
+                  subHeader.setTextSize(11f);
+                  titleCol.addView(subHeader);
+                  topBar.addView(titleCol);
+
+                  TextView shizChip = new TextView(this);
+                  shizChip.setText("SHIZUKU");
+                  shizChip.setTextColor(Color.parseColor("#00E676"));
+                  shizChip.setTextSize(11f);
+                  shizChip.setTypeface(Typeface.DEFAULT_BOLD);
+                  shizChip.setPadding(24, 10, 24, 10);
+                  GradientDrawable shizBg = new GradientDrawable();
+                  shizBg.setColor(Color.parseColor("#112E20"));
+                  shizBg.setCornerRadius(30f);
+                  shizBg.setStroke(2, Color.parseColor("#00E676"));
+                  shizChip.setBackground(shizBg);
+                  topBar.addView(shizChip);
+
+                  mainVertical.addView(topBar);
+
+                  ScrollView scrollArea = new ScrollView(this);
+                  scrollArea.setFillViewport(true);
+                  scrollArea.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  FrameLayout pageContainer = new FrameLayout(this);
+                  pageContainer.setPadding(32, 8, 32, 32);
+
+                  pageProfile = new LinearLayout(this);
+                  pageProfile.setOrientation(LinearLayout.VERTICAL);
+                  buildProfilePage();
+
+                  pageQuickLaunch = new LinearLayout(this);
+                  pageQuickLaunch.setOrientation(LinearLayout.VERTICAL);
+                  pageQuickLaunch.setVisibility(View.GONE);
+                  buildQuickLaunchAndKeygenPage();
+
+                  pageGameTools = new LinearLayout(this);
+                  pageGameTools.setOrientation(LinearLayout.VERTICAL);
+                  pageGameTools.setVisibility(View.GONE);
+                  buildGameToolsPage();
+
+                  pageContainer.addView(pageProfile);
+                  pageContainer.addView(pageQuickLaunch);
+                  pageContainer.addView(pageGameTools);
+                  scrollArea.addView(pageContainer);
+                  mainVertical.addView(scrollArea);
+
+                  LinearLayout bottomNav = new LinearLayout(this);
+                  bottomNav.setOrientation(LinearLayout.HORIZONTAL);
+                  bottomNav.setGravity(Gravity.CENTER);
+                  bottomNav.setPadding(24, 16, 24, 16);
+                  GradientDrawable navBg = new GradientDrawable();
+                  navBg.setColor(Color.parseColor("#101D17"));
+                  navBg.setStroke(2, Color.parseColor("#1F382C"));
+                  bottomNav.setBackground(navBg);
+
+                  navBtnProfile = makeNavTabButton("⊞  Profile", true);
+                  navBtnBolt = makeNavTabButton("⚡", false);
+                  navBtnTools = makeNavTabButton("🛠️  Game Tools", false);
+
+                  navBtnProfile.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { switchPage(0); } });
+                  navBtnBolt.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { switchPage(1); } });
+                  navBtnTools.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { switchPage(2); } });
+
+                  bottomNav.addView(navBtnProfile, new LinearLayout.LayoutParams(0, 110, 1f));
+                  bottomNav.addView(navBtnBolt, new LinearLayout.LayoutParams(0, 110, 0.7f));
+                  bottomNav.addView(navBtnTools, new LinearLayout.LayoutParams(0, 110, 1f));
+                  mainVertical.addView(bottomNav);
+
+                  rootFrame.addView(mainVertical);
+
+                  lightningOverlay = new FrameLayout(this);
+                  lightningOverlay.setBackgroundColor(Color.parseColor("#3300E676"));
+                  lightningOverlay.setVisibility(View.GONE);
+                  rootFrame.addView(lightningOverlay);
+
+                  setContentView(rootFrame);
+              }
+
+              private void switchPage(int idx) {
+                  pageProfile.setVisibility(idx == 0 ? View.VISIBLE : View.GONE);
+                  pageQuickLaunch.setVisibility(idx == 1 ? View.VISIBLE : View.GONE);
+                  pageGameTools.setVisibility(idx == 2 ? View.VISIBLE : View.GONE);
+                  if (idx == 0) headerTitleTv.setText("Profile");
+                  else if (idx == 1) headerTitleTv.setText("KALYVRA TOOLS");
+                  else headerTitleTv.setText("GameTools");
+                  styleNavTab(navBtnProfile, idx == 0);
+                  styleNavTab(navBtnBolt, idx == 1);
+                  styleNavTab(navBtnTools, idx == 2);
+              }
+
+              private Button makeNavTabButton(String text, boolean active) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setAllCaps(false);
+                  b.setTextSize(13f);
+                  styleNavTab(b, active);
+                  return b;
+              }
+
+              private void styleNavTab(Button b, boolean active) {
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setCornerRadius(22f);
+                  if (active) {
+                      bg.setColor(Color.parseColor("#183D2B"));
+                      bg.setStroke(2, Color.parseColor("#00E676"));
+                      b.setTextColor(Color.parseColor("#00E676"));
+                      b.setTypeface(Typeface.DEFAULT_BOLD);
+                  } else {
+                      bg.setColor(Color.TRANSPARENT);
+                      b.setTextColor(Color.parseColor("#8CA396"));
+                      b.setTypeface(Typeface.DEFAULT);
+                  }
+                  b.setBackground(bg);
+              }
+
+              private void playGreenLightningAnimation() {
+                  if (lightningOverlay == null) return;
+                  lightningOverlay.setVisibility(View.VISIBLE);
+                  handler.postDelayed(new Runnable() {
+                      @Override public void run() { lightningOverlay.setVisibility(View.GONE); }
+                  }, 180L);
+              }
+
+              private void buildProfilePage() {
+                  LinearLayout envCard = makeVideoCard("#163828", "#00E676");
+                  envCard.setOrientation(LinearLayout.HORIZONTAL);
+                  envCard.setGravity(Gravity.CENTER_VERTICAL);
+
+                  TextView scoreCircle = makeLabel("48", 22f, "#00E676", true);
+                  scoreCircle.setGravity(Gravity.CENTER);
+                  GradientDrawable scBg = new GradientDrawable();
+                  scBg.setShape(GradientDrawable.OVAL);
+                  scBg.setColor(Color.parseColor("#10291D"));
+                  scBg.setStroke(4, Color.parseColor("#00E676"));
+                  scoreCircle.setBackground(scBg);
+                  LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(130, 130);
+                  scLp.rightMargin = 28;
+                  scoreCircle.setLayoutParams(scLp);
+                  envCard.addView(scoreCircle);
+
+                  LinearLayout envTextCol = new LinearLayout(this);
+                  envTextCol.setOrientation(LinearLayout.VERTICAL);
+                  envTextCol.addView(makeLabel("Skor Lingkungan", 17f, "#FFFFFF", true));
+                  envTextCol.addView(makeLabel("Indeks Kesehatan & Stabilitas Sistem", 12f, "#A5C4B4", false));
+                  envCard.addView(envTextCol);
+                  pageProfile.addView(envCard);
+
+                  LinearLayout profCard = makeVideoCard("#0E1914", "#1B3026");
+                  profCard.addView(makeLabel("Profile Pengguna", 16f, "#FFFFFF", true));
+                  profCard.addView(makeLabel("ID : 192\\nHWID : " + (userHwid.isEmpty() ? licenseManager.getDeviceHwid() : userHwid), 12f, "#7E968A", false));
+                  profCard.addView(makeLabel("Verified Access  ✔", 13f, "#00E676", true));
+
+                  LinearLayout ancareBox = makeVideoCard("#1B4D35", "#2B6E4E");
+                  ancareBox.addView(makeLabel("Ancare • KALYVRA VIP", 15f, "#A5D6BE", true));
+                  ancareBox.addView(makeLabel("Key Aktif: " + activeKey + " (" + userRole + ")", 12f, "#FFFFFF", false));
+                  ancareBox.addView(makeLabel("Berlaku sampai: " + LicenseManager.formatTimestamp(expiresAt), 12f, "#D0EFE0", false));
+
+                  boolean isDevOrReseller = "DEVELOPER".equals(userRole) || "RESELLER".equals(userRole);
+                  Button btnRenew = makeGreenBtn(isDevOrReseller ? "CREATE KEY" : "PERBARUI");
+                  btnRenew.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { switchPage(1); } });
+                  ancareBox.addView(btnRenew);
+                  profCard.addView(ancareBox);
+
+                  Button btnBuyVipChat = makeGreenBtn("💬 BUY VIP CHAT 085602595546");
+                  LinearLayout.LayoutParams vipLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  vipLp.topMargin = 16;
+                  btnBuyVipChat.setLayoutParams(vipLp);
+                  btnBuyVipChat.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          playGreenLightningAnimation();
+                          String url = "https://api.whatsapp.com/send?phone=6285602595546&text=" + Uri.encode("Halo Admin, saya mau BUY VIP KALYVRA TOOLS.");
+                          startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                      }
+                  });
+                  profCard.addView(btnBuyVipChat);
+                  pageProfile.addView(profCard);
+
+                  LinearLayout srvCard = makeVideoCard("#10241B", "#1E4231");
+                  srvCard.addView(makeLabel("Layanan Pengguna", 15f, "#B0C9BC", true));
+                  srvCard.addView(makeLabel("● Online", 13f, "#00E676", true));
+                  uptimeClockTv = makeLabel("00:00:05 Waktu Aktif", 14f, "#FFFFFF", true);
+                  srvCard.addView(uptimeClockTv);
+                  srvCard.addView(makeLabel("PID   " + Process.myPid() + "      UID   2000      VER   1.0.0(1)", 11f, "#A0B8AC", false));
+                  pageProfile.addView(srvCard);
+
+                  LinearLayout sysCard = makeVideoCard("#0E1914", "#1B3026");
+                  sysCard.addView(makeLabel("Informasi Sistem                                 Version 1.0.0", 13f, "#FFFFFF", true));
+
+                  ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+                  ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                  am.getMemoryInfo(mi);
+                  int ramPct = (int) (((mi.totalMem - mi.availMem) * 100L) / mi.totalMem);
+                  double totalGb = mi.totalMem / (1024.0 * 1024.0 * 1024.0);
+
+                  File dataDir = Environment.getDataDirectory();
+                  StatFs stat = new StatFs(dataDir.getPath());
+                  long totalBytes = stat.getTotalBytes();
+                  long availBytes = stat.getAvailableBytes();
+                  int storagePct = (int) (((totalBytes - availBytes) * 100L) / totalBytes);
+                  long storageGb = totalBytes / (1024L * 1024L * 1024L);
+
+                  LinearLayout row1 = new LinearLayout(this);
+                  row1.setOrientation(LinearLayout.HORIZONTAL);
+                  row1.addView(makeSysTile("RAM Usage", ramPct + "%", String.format(Locale.US, "Total %.1f GB", totalGb)), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  row1.addView(makeSysTile("Storage", storagePct + "%", "Total " + storageGb + " GB"), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  sysCard.addView(row1);
+
+                  LinearLayout row2 = new LinearLayout(this);
+                  row2.setOrientation(LinearLayout.HORIZONTAL);
+                  row2.addView(makeSysTile("CPU Speed", "2.00 GHz", "Max 2.00 GHz"), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  row2.addView(makeSysTile("Network", "- ms", "8.8.8.8"), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  sysCard.addView(row2);
+
+                  sysCard.addView(makeLabel(Build.MANUFACTURER + " " + Build.MODEL + " - Android " + Build.VERSION.RELEASE + " - " + Build.BOARD, 11f, "#7C9488", false));
+                  pageProfile.addView(sysCard);
+
+                  LinearLayout chanCard = makeVideoCard("#0E1914", "#1B3026");
+                  chanCard.addView(makeLabel("Gabung ke Saluran Resmi", 15f, "#FFFFFF", true));
+                  chanCard.addView(makeLabel("Bergabung ke saluran resmi untuk memantau update, info penting, dan pengumuman resmi secara langsung", 12f, "#7C9488", false));
+                  pageProfile.addView(chanCard);
+              }
+
+              private void buildQuickLaunchAndKeygenPage() {
+                  LinearLayout launchCard = makeVideoCard("#122B1F", "#00E676");
+                  launchCard.addView(makeLabel("⚡ PELUNCUR CEPAT IN-GAME FREE FIRE", 16f, "#00E676", true));
+                  launchCard.addView(makeLabel("Aktifkan fitur di tab Game Tools terlebih dahulu, lalu luncurkan Free Fire dari tombol di bawah agar profil Shizuku bekerja penuh di dalam game.", 12f, "#B0C9BC", false));
+
+                  Button btnLaunchFf = makeGreenBtn("BUKA FREE FIRE (" + targetPackage + ")");
+                  btnLaunchFf.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          playGreenLightningAnimation();
+                          Intent launch = getPackageManager().getLaunchIntentForPackage(targetPackage);
+                          if (launch != null) startActivity(launch);
+                          else Toast.makeText(MainDashboardActivity.this, "Paket " + targetPackage + " belum terinstal di HP ini!", Toast.LENGTH_SHORT).show();
+                      }
+                  });
+                  launchCard.addView(btnLaunchFf);
+                  pageQuickLaunch.addView(launchCard);
+
+                  LinearLayout devCard = makeVideoCard("#0E1914", "#1B3026");
+                  devCard.addView(makeLabel("🔑 PANEL DEVELOPER — CREATE KEY (1 KEY 1 DEVICE)", 15f, "#00E676", true));
+                  devCard.addView(makeLabel("Pilih durasi key untuk pelanggan (Otomatis mengunci HWID perangkat pertama yang login):", 12f, "#8CA396", false));
+
+                  final Spinner tierSpinner = new Spinner(this);
+                  String[] tiers = new String[]{
+                      "1 Day (1Key 1Device)", "3 Day (1Key 1Device)", "7 Day (1Key 1Device)",
+                      "15 Day (1Key 1Device)", "30 Day (1Key 1Device)", "Permanent (1Key 1Device)", "Reseller (1Key 1Device)"
+                  };
+                  tierSpinner.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, tiers));
+                  GradientDrawable spBg = new GradientDrawable();
+                  spBg.setColor(Color.parseColor("#183326"));
+                  spBg.setCornerRadius(14f);
+                  tierSpinner.setBackground(spBg);
+                  devCard.addView(tierSpinner);
+
+                  final EditText etCustomHwid = new EditText(this);
+                  etCustomHwid.setHint("Opsional: Isi HWID user (Kosongkan = Auto Lock saat login)");
+                  etCustomHwid.setHintTextColor(Color.parseColor("#5C786A"));
+                  etCustomHwid.setTextColor(Color.WHITE);
+                  devCard.addView(etCustomHwid);
+
+                  final TextView tvGeneratedKey = makeLabel("Key hasil generate akan muncul di sini...", 13f, "#00E676", true);
+                  devCard.addView(tvGeneratedKey);
+
+                  final TextView tvDbSummary = makeLabel(licenseManager.dumpAllKeysSummary(), 11f, "#A5C4B4", false);
+
+                  Button btnCreateKey = makeGreenBtn("CREATE KEY & SALIN OTOMATIS");
+                  btnCreateKey.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          playGreenLightningAnimation();
+                          int pos = tierSpinner.getSelectedItemPosition();
+                          LicenseManager.Tier selected = LicenseManager.Tier.values()[pos];
+                          String newKey = licenseManager.generateLicenseKey(selected, etCustomHwid.getText().toString());
+                          tvGeneratedKey.setText("KEY BERHASIL DIBUAT:\\n" + newKey + " (" + selected.label + ")");
+                          ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                          cm.setPrimaryClip(ClipData.newPlainText("KEY", newKey));
+                          tvDbSummary.setText(licenseManager.dumpAllKeysSummary());
+                          Toast.makeText(MainDashboardActivity.this, "Key " + newKey + " disalin ke Clipboard!", Toast.LENGTH_SHORT).show();
+                      }
+                  });
+                  devCard.addView(btnCreateKey);
+
+                  final EditText etResetKey = new EditText(this);
+                  etResetKey.setHint("Ketik Key untuk Reset HWID");
+                  etResetKey.setHintTextColor(Color.parseColor("#5C786A"));
+                  etResetKey.setTextColor(Color.WHITE);
+                  devCard.addView(etResetKey);
+
+                  Button btnResetHwid = makeDarkBtn("RESET HWID KEY");
+                  btnResetHwid.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          boolean ok = licenseManager.resetHwidForKey(etResetKey.getText().toString());
+                          tvDbSummary.setText(licenseManager.dumpAllKeysSummary());
+                          Toast.makeText(MainDashboardActivity.this, ok ? "HWID di-reset!" : "Key tidak ditemukan", Toast.LENGTH_SHORT).show();
+                      }
+                  });
+                  devCard.addView(btnResetHwid);
+
+                  devCard.addView(makeLabel("\\nDatabase Key Aktif:", 13f, "#FFFFFF", true));
+                  devCard.addView(tvDbSummary);
+                  pageQuickLaunch.addView(devCard);
+              }
+
+              private void buildGameToolsPage() {
+                  LinearLayout chipRow = new LinearLayout(this);
+                  chipRow.setOrientation(LinearLayout.HORIZONTAL);
+                  chipRow.setPadding(0, 0, 0, 16);
+                  chipRow.addView(makeChip("✔ Semua", true));
+                  chipRow.addView(makeChip("👁️ Visual", false));
+                  chipRow.addView(makeChip("⚙ Konfigurasi", false));
+                  pageGameTools.addView(chipRow);
+
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "🎯", "DRAG HS", "VIP",
+                      "Kalibrasi sensitivitas vertikal & touch slop agar tarikan tembakan langsung naik ke kepala di dalam game (100% Safe No-Root).",
+                      null,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { ShizukuShellManager.applyDragHs(checked, targetPackage); } }
+                  ));
+
+                  View bodyEasyDrag = makeVideoSlider("Kelicinan Tarikan Easy Drag [VIP]", "Smooth", "Fast Swipe", "Instant Head", 2, 2, new SliderListener() {
+                      @Override public void onChanged(int progress) { easyDragLevel = progress; ShizukuShellManager.applyEasyDrag(true, easyDragLevel, targetPackage); }
+                  });
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "⚡", "EASY DRAG", "VIP",
+                      "Menghilangkan hambatan gesekan sentuh vertikal (Zero-Friction Swipe) agar sekali jentik jari langsung naik ke kepala (Safe No-Root).",
+                      bodyEasyDrag,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { ShizukuShellManager.applyEasyDrag(checked, easyDragLevel, targetPackage); } }
+                  ));
+
+                  View bodyAimDrag = makeVideoSlider("Kecepatan Tarikan Y-Axis [VIP]", "Rendah", "Sedang", "Tertinggi", 2, 1, new SliderListener() {
+                      @Override public void onChanged(int progress) { aimDragLevel = progress; ShizukuShellManager.applyAimDrag(true, aimDragLevel); }
+                  });
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "⚡", "AIMDRAG", "VIP",
+                      "Meningkatkan akselerasi swipe layar ke atas agar drag lebih ringan dan responsif (Safe No-Root).",
+                      bodyAimDrag,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { ShizukuShellManager.applyAimDrag(checked, aimDragLevel); } }
+                  ));
+
+                  View bodyAimSmooth = makeVideoSlider("Tingkat Kehalusan Bidikan [VIP]", "Cepat", "Stabil", "Halus", 2, 1, new SliderListener() {
+                      @Override public void onChanged(int progress) { aimSmoothLevel = progress; ShizukuShellManager.applyAimSmooth(true, aimSmoothLevel); }
+                  });
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "⌖", "AIM SMOOTH", "VIP",
+                      "Menstabilkan interpolasi sentuhan layar agar pergerakan crosshair tidak patah-patah (Safe No-Root).",
+                      bodyAimSmooth,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { ShizukuShellManager.applyAimSmooth(checked, aimSmoothLevel); } }
+                  ));
+
+                  View bodyRecoil = makeVideoSlider("Peredam Getaran Recoil [VIP]", "25%", "50%", "100%", 2, 1, new SliderListener() {
+                      @Override public void onChanged(int progress) { recoilLevel = progress; ShizukuShellManager.applyControlRecoil(true, recoilLevel); }
+                  });
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "🛡️", "CONTROL RECOIL", "VIP",
+                      "Meredam guncangan titik sentuh saat menahan tombol tembak beruntun (Safe No-Root).",
+                      bodyRecoil,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { ShizukuShellManager.applyControlRecoil(checked, recoilLevel); } }
+                  ));
+
+                  View bodyAimAssist = makeVideoSlider("Presisi Lock & Gyro Matrix [VIP]", "Ringan", "Medium", "Max Lock", 2, 1, new SliderListener() {
+                      @Override public void onChanged(int progress) { aimAssistLevel = progress; ShizukuShellManager.applyAimAssist(true, aimAssistLevel); }
+                  });
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "🔥", "AIM ASSIST", "VIP",
+                      "Optimalisasi presisi pointer speed & 240Hz touch sampling matrix agar bidikan lengket di target (Safe No-Root).",
+                      bodyAimAssist,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { ShizukuShellManager.applyAimAssist(checked, aimAssistLevel); } }
+                  ));
+
+                  View bodyRogPc = makeVideoSlider("Skala Grafik Ringan ROG/PC [VIP]", "ROG Smooth", "PC Balanced", "PC Ultra 120FPS", 2, 2, new SliderListener() {
+                      @Override public void onChanged(int progress) { gameSpaceRogLevel = progress; ShizukuShellManager.applyGameSpaceRogPc(true, gameSpaceRogLevel, targetPackage); }
+                  });
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "💻", "GAME SPACE GRAFIK RINGAN ROG/PC", "VIP",
+                      "Render grafik ringan ala ROG Phone / PC Emulator: Downscale resolusi GPU enteng, paksa 120FPS & SkiaGL tanpa root.",
+                      bodyRogPc,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { ShizukuShellManager.applyGameSpaceRogPc(checked, gameSpaceRogLevel, targetPackage); } }
+                  ));
+
+                  View bodyWare = makeVideoSlider("Tingkat Peningkatan Performa [VIP]", "Seimbang", "Tinggi", "Ekstrem 120FPS", 2, 2, new SliderListener() {
+                      @Override public void onChanged(int progress) { danzWareLevel = progress; ShizukuShellManager.applyDanzWarePerformance(true, danzWareLevel, targetPackage); }
+                  });
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "🚀", "KALYVRA / DANZ WARE", "VIP",
+                      "Mesin peningkat performa ekstrem in-game: Unlock 120FPS Game Mode, kunci frekuensi CPU/GPU anti-drop, Skiagl Render, dan AOT Speed.",
+                      bodyWare,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { ShizukuShellManager.applyDanzWarePerformance(checked, danzWareLevel, targetPackage); } }
+                  ));
+
+                  LinearLayout dpiBody = new LinearLayout(this);
+                  dpiBody.setOrientation(LinearLayout.VERTICAL);
+                  dpiBody.addView(makeLabel("\\nPengaturan Awal", 13f, "#FFFFFF", true));
+                  dpiBody.addView(makeLabel("Alat untuk membuka pengaturan DPI dan resolusi secara tersembunyi.", 11f, "#7C9488", false));
+                  Button btnSetDpi = makeGreenBtn("KETUK PENGATURAN");
+                  btnSetDpi.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showDpiDialog(); } });
+                  dpiBody.addView(btnSetDpi);
+
+                  dpiBody.addView(makeLabel("\\nAtur Ulang Resolusi dan DPI", 13f, "#FFFFFF", true));
+                  dpiBody.addView(makeLabel("Untuk mereset semua sistem resolusi pada tampilan, dengan fitur ini memudahkan untuk kembali normal.", 11f, "#7C9488", false));
+                  Button btnResetDpi = makeGreenBtn("KETUK UNTUK MENGATUR ULANG");
+                  btnResetDpi.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          playGreenLightningAnimation();
+                          ShizukuShellManager.execAdbAsync("wm density reset && wm size reset");
+                          Toast.makeText(MainDashboardActivity.this, "Resolusi & DPI dikembalikan ke normal!", Toast.LENGTH_SHORT).show();
+                      }
+                  });
+                  dpiBody.addView(btnResetDpi);
+
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "📱", "DPI Smart Costum", "VIP",
+                      "Fitur ini mengoptimalkan skala DPI secara otomatis ketika bermain dan kembali normal saat digunakan dalam aktivitas standar.",
+                      dpiBody,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) {} }
+                  ));
+
+                  LinearLayout pkgRow = new LinearLayout(this);
+                  pkgRow.setOrientation(LinearLayout.HORIZONTAL);
+                  Button btnFfTh = makeGreenBtn("com.dts.freefireth");
+                  Button btnFfMax = makeDarkBtn("com.dts.freefiremax");
+                  btnFfTh.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { targetPackage = "com.dts.freefireth"; Toast.makeText(MainDashboardActivity.this, "Target aktif: com.dts.freefireth", Toast.LENGTH_SHORT).show(); }
+                  });
+                  btnFfMax.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { targetPackage = "com.dts.freefiremax"; Toast.makeText(MainDashboardActivity.this, "Target aktif: com.dts.freefiremax", Toast.LENGTH_SHORT).show(); }
+                  });
+                  pkgRow.addView(btnFfTh, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  pkgRow.addView(btnFfMax, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  pageGameTools.addView(pkgRow);
+
+                  View bodyPatchSens = makeVideoSlider("Tingkat Sensitivitas [VIP]", "Terendah", "Sedang", "Tertinggi", 7, 4, new SliderListener() {
+                      @Override public void onChanged(int progress) { ShizukuShellManager.execAdbAsync("settings put system pointer_speed " + progress); }
+                  });
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "🎚️", "Patch Sensitivitas 1.0", "",
+                      "Penyesuaian otomatis untuk sensitivitas yang lebih optimal ( TIDAK SEMUA DEVICE BEKERJA ).",
+                      bodyPatchSens,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { ShizukuShellManager.execAdbAsync("settings put system pointer_speed " + (checked ? 5 : 0)); } }
+                  ));
+
+                  LinearLayout touchAccBody = new LinearLayout(this);
+                  touchAccBody.setOrientation(LinearLayout.VERTICAL);
+                  touchAccBody.addView(makeVideoSlider("Klik Batas Waktu [VIP]", "Terendah", "Sedang", "Tertinggi", 2, 1, new SliderListener() {
+                      @Override public void onChanged(int progress) { ShizukuShellManager.execAdbAsync("settings put secure long_press_timeout " + (300 - (progress * 50))); }
+                  }));
+                  touchAccBody.addView(makeVideoSlider("Batas Waktu Berganda [VIP]", "Bawaan", "Lebih cepat", "Perangkat", 2, 1, new SliderListener() {
+                      @Override public void onChanged(int progress) { ShizukuShellManager.execAdbAsync("settings put secure multi_press_timeout " + (250 - (progress * 50))); }
+                  }));
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "👆", "Akselerator Sentuh", "",
+                      "Mempercepat respon multi-tap dan gesture detection.",
+                      touchAccBody,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { ShizukuShellManager.execAdbAsync("settings put secure long_press_timeout " + (checked ? 200 : 400)); } }
+                  ));
+
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "⚡", "Pelempar Permukaan", "VIP",
+                      "Menyesuaikan konfigurasi SurfaceFlinger dengan refresh rate aktif guna meningkatkan respons compositing dan stabilitas frame rendering.",
+                      null,
+                      new ToggleAction() {
+                          @Override public void onToggle(boolean checked) {
+                              int v = checked ? 1 : 0;
+                              ShizukuShellManager.execAdbAsync("service call SurfaceFlinger 1008 i32 " + v + " && setprop debug.sf.latch_unsignaled " + v);
+                          }
+                      }
+                  ));
+
+                  LinearLayout goPhoneBody = new LinearLayout(this);
+                  goPhoneBody.setOrientation(LinearLayout.VERTICAL);
+                  goPhoneBody.addView(makeGoPhoneCheck("Freezer scheduler", "device_config put activity_manager use_freezer true"));
+                  goPhoneBody.addView(makeGoPhoneCheck("Max Cached", "device_config put activity_manager max_cached_processes 4"));
+                  goPhoneBody.addView(makeGoPhoneCheck("Memory Compaction", "device_config put activity_manager use_compaction true"));
+                  goPhoneBody.addView(makeGoPhoneCheck("Imperceptible Kill", "am kill-all"));
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "🧹", "Optimalkan GoPhone", "VIP",
+                      "Dengan fitur ini dapat mengurangi beban CPU GPU sehingga device terasa lebih ringan dan responsif.",
+                      goPhoneBody,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { if (checked) ShizukuShellManager.execAdbAsync("am kill-all"); } }
+                  ));
+
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "🗑️", "Bersihkan Cache", "",
+                      "Membersihkan sebagian cache pada direktori data melalui sistem scan otomatis.",
+                      null,
+                      new ToggleAction() {
+                          @Override public void onToggle(boolean checked) {
+                              if (checked) {
+                                  ShizukuShellManager.execAdbAsync("pm trim-caches 4096M && rm -rf /sdcard/Android/data/" + targetPackage + "/cache/*");
+                                  Toast.makeText(MainDashboardActivity.this, "Cache " + targetPackage + " & sistem dibersihkan!", Toast.LENGTH_SHORT).show();
+                              }
+                          }
+                      }
+                  ));
+
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "🎮", "ANGLE Rendering", "",
+                      "Menjalankan OpenGL ES melalui Vulkan (ANGLE) untuk meningkatkan kompatibilitas dan pada beberapa perangkat dapat meningkatkan performa.",
+                      null,
+                      new ToggleAction() {
+                          @Override public void onToggle(boolean checked) {
+                              String mode = checked ? "angle" : "default";
+                              ShizukuShellManager.execAdbAsync("settings put global angle_gl_driver_selection_pkgs " + targetPackage + " && settings put global angle_gl_driver_selection_values " + mode);
+                          }
+                      }
+                  ));
+
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "➕", "Kustomisasi Bidik Anda", "",
+                      "Memudahkan untuk membidik ketika anda menggunakan senjata yang tidak memiliki crosshair.",
+                      buildCrosshairCustomizerBody(),
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { OverlayEngineService.setCrosshairVisible(checked); } }
+                  ));
+
+                  LinearLayout rogBody = new LinearLayout(this);
+                  rogBody.setOrientation(LinearLayout.VERTICAL);
+                  String[] metrics = new String[]{"CPU Information", "RAM Information", "Temperature Information", "Battery Information", "FPS Information", "Time Information"};
+                  for (int i = 0; i < metrics.length; i++) {
+                      final int idx = i;
+                      CheckBox cb = new CheckBox(this);
+                      cb.setText(metrics[i]);
+                      cb.setTextColor(Color.WHITE);
+                      cb.setChecked(true);
+                      cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+                          @Override public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) { OverlayEngineService.setRogMetric(idx, isChecked); }
+                      });
+                      rogBody.addView(cb);
+                  }
+                  pageGameTools.addView(makeExpandableFeatureCard(
+                      "📊", "Pemantauan ROG", "",
+                      "Pemantauan Suhu, jam, GPU, CPU, FPS secara real-time dengan menggunakan style ROG.",
+                      rogBody,
+                      new ToggleAction() { @Override public void onToggle(boolean checked) { OverlayEngineService.setRogVisible(checked); } }
+                  ));
+              }
+
+              private View buildCrosshairCustomizerBody() {
+                  LinearLayout box = new LinearLayout(this);
+                  box.setOrientation(LinearLayout.VERTICAL);
+
+                  LinearLayout styleRow = new LinearLayout(this);
+                  styleRow.setOrientation(LinearLayout.HORIZONTAL);
+                  String[] icons = new String[]{"✛", "⌖", "➕", "⊕"};
+                  for (int i = 0; i < icons.length; i++) {
+                      final int sIdx = i;
+                      Button b = makeDarkBtn(icons[i]);
+                      b.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { OverlayEngineService.setCrosshairStyle(sIdx); } });
+                      styleRow.addView(b, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  }
+                  box.addView(styleRow);
+
+                  final TextView posInfo = makeLabel("X = 0   Y = 0          Sudut: 80°          Size: 58", 12f, "#00E676", true);
+                  box.addView(posInfo);
+
+                  LinearLayout dpadRow = new LinearLayout(this);
+                  dpadRow.setOrientation(LinearLayout.HORIZONTAL);
+                  String[] dLabels = new String[]{"◀ X-", "▲ Y-", "▼ Y+", "▶ X+"};
+                  final int[][] deltas = new int[][]{{-4, 0}, {0, -4}, {0, 4}, {4, 0}};
+                  for (int i = 0; i < 4; i++) {
+                      final int dx = deltas[i][0];
+                      final int dy = deltas[i][1];
+                      Button b = makeDarkBtn(dLabels[i]);
+                      b.setOnClickListener(new View.OnClickListener() {
+                          @Override public void onClick(View v) {
+                              OverlayEngineService.nudgeCrosshairPosition(dx, dy);
+                              posInfo.setText("X = " + OverlayEngineService.getCrosshairX() + "   Y = " + OverlayEngineService.getCrosshairY());
+                          }
+                      });
+                      dpadRow.addView(b, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  }
+                  box.addView(dpadRow);
+
+                  box.addView(makeVideoSlider("Rotasi Sudut Bidik (0° - 360°)", "0°", "180°", "360°", 360, 80, new SliderListener() {
+                      @Override public void onChanged(int progress) {
+                          OverlayEngineService.setCrosshairAngle(progress);
+                          posInfo.setText("X = " + OverlayEngineService.getCrosshairX() + "   Y = " + OverlayEngineService.getCrosshairY() + "   Sudut: " + progress + "°");
+                      }
+                  }));
+
+                  box.addView(makeVideoSlider("Ukuran Bidik (Size)", "Kecil", "58", "Besar", 140, 58, new SliderListener() {
+                      @Override public void onChanged(int progress) { OverlayEngineService.setCrosshairSize(Math.max(20, progress)); }
+                  }));
+
+                  box.addView(makeVideoSlider("Opacity", "Transparan", "Sedang", "Penuh", 255, 255, new SliderListener() {
+                      @Override public void onChanged(int progress) { OverlayEngineService.setCrosshairAlpha(progress); }
+                  }));
+
+                  LinearLayout colorRow = new LinearLayout(this);
+                  colorRow.setOrientation(LinearLayout.HORIZONTAL);
+                  final int[] colors = new int[]{Color.parseColor("#00E676"), Color.parseColor("#FF6D00"), Color.parseColor("#00B0FF"), Color.WHITE};
+                  String[] cNames = new String[]{"HIJAU", "ORANYE", "BIRU", "PUTIH"};
+                  for (int i = 0; i < colors.length; i++) {
+                      final int cVal = colors[i];
+                      Button b = makeDarkBtn(cNames[i]);
+                      b.setTextColor(cVal);
+                      b.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { OverlayEngineService.setCrosshairColor(cVal); } });
+                      colorRow.addView(b, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  }
+                  box.addView(colorRow);
+                  return box;
+              }
+
+              private void showDpiDialog() {
+                  AlertDialog.Builder b = new AlertDialog.Builder(this);
+                  b.setTitle("DPI Smart Costum (Shizuku ADB)");
+                  b.setMessage("Masukkan nilai DPI untuk Free Fire:");
+                  final EditText input = new EditText(this);
+                  input.setHint("Contoh: 580");
+                  b.setView(input);
+                  b.setPositiveButton("TERAPKAN", new DialogInterface.OnClickListener() {
+                      @Override public void onClick(DialogInterface dialog, int which) {
+                          String dpi = input.getText().toString().trim();
+                          if (!dpi.isEmpty()) {
+                              playGreenLightningAnimation();
+                              ShizukuShellManager.execAdbAsync("wm density " + dpi);
+                              Toast.makeText(MainDashboardActivity.this, "DPI diatur ke " + dpi, Toast.LENGTH_SHORT).show();
+                          }
+                      }
+                  });
+                  b.setNegativeButton("BATAL", null);
+                  b.show();
+              }
+
+              private View makeGoPhoneCheck(String label, final String cmd) {
+                  CheckBox cb = new CheckBox(this);
+                  cb.setText(label);
+                  cb.setTextColor(Color.WHITE);
+                  cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+                      @Override public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                          if (isChecked) { playGreenLightningAnimation(); ShizukuShellManager.execAdbAsync(cmd); }
+                      }
+                  });
+                  return cb;
+              }
+
+              private LinearLayout makeExpandableFeatureCard(String icon, String title, String badge, String desc, final View extraBody, final ToggleAction action) {
+                  final LinearLayout card = makeVideoCard("#0E1914", "#1B3026");
+                  LinearLayout headerRow = new LinearLayout(this);
+                  headerRow.setOrientation(LinearLayout.HORIZONTAL);
+                  headerRow.setGravity(Gravity.CENTER_VERTICAL);
+
+                  TextView titleTv = makeLabel(icon + "  " + title, 15f, "#FFFFFF", true);
+                  titleTv.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  headerRow.addView(titleTv);
+
+                  if (badge != null && !badge.isEmpty()) {
+                      TextView badgeTv = makeLabel(badge, 10f, "#00E676", true);
+                      badgeTv.setPadding(16, 4, 16, 4);
+                      GradientDrawable bBg = new GradientDrawable();
+                      bBg.setColor(Color.parseColor("#143826"));
+                      bBg.setCornerRadius(12f);
+                      badgeTv.setBackground(bBg);
+                      headerRow.addView(badgeTv);
+                  }
+
+                  Switch sw = new Switch(this);
+                  headerRow.addView(sw);
+                  card.addView(headerRow);
+                  card.addView(makeLabel(desc, 12f, "#7C9488", false));
+
+                  if (extraBody != null) {
+                      extraBody.setVisibility(View.GONE);
+                      card.addView(extraBody);
+                  }
+
+                  sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+                      @Override public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                          playGreenLightningAnimation();
+                          GradientDrawable bg = new GradientDrawable();
+                          bg.setCornerRadius(24f);
+                          bg.setColor(Color.parseColor(isChecked ? "#11241B" : "#0E1914"));
+                          bg.setStroke(2, Color.parseColor(isChecked ? "#00E676" : "#1B3026"));
+                          card.setBackground(bg);
+                          if (extraBody != null) extraBody.setVisibility(isChecked ? View.VISIBLE : View.GONE);
+                          if (action != null) action.onToggle(isChecked);
+                      }
+                  });
+                  return card;
+              }
+
+              private View makeVideoSlider(String title, String leftLbl, String midLbl, String rightLbl, int max, int def, final SliderListener listener) {
+                  LinearLayout wrap = new LinearLayout(this);
+                  wrap.setOrientation(LinearLayout.VERTICAL);
+                  wrap.setPadding(0, 16, 0, 8);
+                  wrap.addView(makeLabel(title, 12f, "#FFFFFF", true));
+
+                  SeekBar sb = new SeekBar(this);
+                  sb.setMax(max);
+                  sb.setProgress(def);
+                  sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                          if (listener != null) listener.onChanged(progress);
+                      }
+                      @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+                      @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+                  });
+                  wrap.addView(sb);
+
+                  LinearLayout lblRow = new LinearLayout(this);
+                  lblRow.setOrientation(LinearLayout.HORIZONTAL);
+                  TextView l1 = makeLabel(leftLbl, 10f, "#7C9488", false);
+                  TextView l2 = makeLabel(midLbl, 10f, "#7C9488", false);
+                  l2.setGravity(Gravity.CENTER);
+                  TextView l3 = makeLabel(rightLbl, 10f, "#7C9488", false);
+                  l3.setGravity(Gravity.END);
+                  lblRow.addView(l1, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  lblRow.addView(l2, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  lblRow.addView(l3, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  wrap.addView(lblRow);
+                  return wrap;
+              }
+
+              private LinearLayout makeSysTile(String title, String bigVal, String subVal) {
+                  LinearLayout tile = new LinearLayout(this);
+                  tile.setOrientation(LinearLayout.VERTICAL);
+                  tile.setPadding(24, 20, 24, 20);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Color.parseColor("#13221B"));
+                  bg.setCornerRadius(18f);
+                  tile.setBackground(bg);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  lp.setMargins(8, 8, 8, 8);
+                  tile.setLayoutParams(lp);
+                  tile.addView(makeLabel(title, 11f, "#00E676", true));
+                  tile.addView(makeLabel(bigVal, 18f, "#FFFFFF", true));
+                  tile.addView(makeLabel(subVal, 10f, "#7C9488", false));
+                  return tile;
+              }
+
+              private LinearLayout makeVideoCard(String bgColorHex, String strokeHex) {
+                  LinearLayout card = new LinearLayout(this);
+                  card.setOrientation(LinearLayout.VERTICAL);
+                  card.setPadding(32, 28, 32, 28);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Color.parseColor(bgColorHex));
+                  bg.setCornerRadius(24f);
+                  bg.setStroke(2, Color.parseColor(strokeHex));
+                  card.setBackground(bg);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  lp.bottomMargin = 24;
+                  card.setLayoutParams(lp);
+                  return card;
+              }
+
+              private TextView makeLabel(String text, float sizeSp, String colorHex, boolean bold) {
+                  TextView tv = new TextView(this);
+                  tv.setText(text);
+                  tv.setTextSize(sizeSp);
+                  tv.setTextColor(Color.parseColor(colorHex));
+                  tv.setTypeface(bold ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+                  tv.setPadding(0, 4, 0, 4);
+                  return tv;
+              }
+
+              private Button makeGreenBtn(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setAllCaps(false);
+                  b.setTextColor(Color.parseColor("#070D0A"));
+                  b.setTypeface(Typeface.DEFAULT_BOLD);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Color.parseColor("#00E676"));
+                  bg.setCornerRadius(16f);
+                  b.setBackground(bg);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  lp.topMargin = 14;
+                  b.setLayoutParams(lp);
+                  return b;
+              }
+
+              private Button makeDarkBtn(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setAllCaps(false);
+                  b.setTextColor(Color.WHITE);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Color.parseColor("#172B22"));
+                  bg.setCornerRadius(14f);
+                  bg.setStroke(1, Color.parseColor("#284A3A"));
+                  b.setBackground(bg);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  lp.setMargins(6, 10, 6, 6);
+                  b.setLayoutParams(lp);
+                  return b;
+              }
+
+              private TextView makeChip(String text, boolean active) {
+                  TextView tv = new TextView(this);
+                  tv.setText(text);
+                  tv.setTextSize(12f);
+                  tv.setPadding(28, 12, 28, 12);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setCornerRadius(30f);
+                  if (active) {
+                      bg.setColor(Color.parseColor("#00E676"));
+                      tv.setTextColor(Color.parseColor("#070D0A"));
+                      tv.setTypeface(Typeface.DEFAULT_BOLD);
+                  } else {
+                      bg.setColor(Color.parseColor("#12211A"));
+                      tv.setTextColor(Color.parseColor("#A0B8AC"));
+                  }
+                  tv.setBackground(bg);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  lp.rightMargin = 16;
+                  tv.setLayoutParams(lp);
+                  return tv;
+              }
+
+              private void startUptimeTicker() {
+                  handler.postDelayed(new Runnable() {
+                      @Override public void run() {
+                          long sec = (System.currentTimeMillis() - startTimeMs) / 1000L;
+                          long h = sec / 3600L;
+                          long m = (sec % 3600L) / 60L;
+                          long s = sec % 60L;
+                          if (uptimeClockTv != null) {
+                              uptimeClockTv.setText(String.format(Locale.US, "%02d:%02d:%02d Waktu Aktif", h, m, s));
+                          }
+                          handler.postDelayed(this, 1000L);
+                      }
+                  }, 1000L);
+              }
+          }
+          ''')
+
+          # 4. Cari Android SDK tools di server GitHub
+          sdk_root = os.environ.get("ANDROID_HOME") or "/usr/local/lib/android/sdk"
+          platforms = sorted(glob.glob(sdk_root + "/platforms/android-*/android.jar"))
+          build_tools = sorted(glob.glob(sdk_root + "/build-tools/*"))
+          android_jar = platforms[-1]
+          bt_dir = build_tools[-1]
+          aapt2 = bt_dir + "/aapt2"
+          d8 = bt_dir + "/d8"
+          zipalign = bt_dir + "/zipalign"
+          apksigner = bt_dir + "/apksigner"
+
+          # 5. Compile Resources dengan AAPT2
+          subprocess.run([aapt2, "compile", "--dir", "build_work/res", "-o", "build_work/res.zip"], check=True)
+          os.makedirs("build_work/gen", exist_ok=True)
+          subprocess.run([
+              aapt2, "link", "-I", android_jar,
+              "--manifest", "build_work/AndroidManifest.xml",
+              "-o", "build_work/unaligned.apk",
+              "--java", "build_work/gen",
+              "build_work/res.zip"
+          ], check=True)
+
+          # 6. Compile semua file Java dengan JAVAC
+          os.makedirs("build_work/classes", exist_ok=True)
+          java_files = glob.glob("build_work/src/**/*.java", recursive=True) + glob.glob("build_work/gen/**/*.java", recursive=True)
+          subprocess.run([
+              "javac", "-source", "1.8", "-target", "1.8",
+              "-bootclasspath", android_jar,
+              "-classpath", android_jar,
+              "-d", "build_work/classes"
+          ] + java_files, check=True)
+
+          # 7. Ubah .class menjadi classes.dex dengan D8
+          class_files = glob.glob("build_work/classes/**/*.class", recursive=True)
+          subprocess.run([d8, "--lib", android_jar, "--output", "build_work"] + class_files, check=True)
+
+          # 8. Masukkan classes.dex ke dalam APK
+          with zipfile.ZipFile("build_work/unaligned.apk", "a") as zf:
+              zf.write("build_work/classes.dex", "classes.dex")
+
+          # 9. Zipalign & Sign APK
+          subprocess.run([zipalign, "-p", "-f", "4", "build_work/unaligned.apk", "build_work/aligned.apk"], check=True)
+          subprocess.run([
+              "keytool", "-genkeypair", "-v",
+              "-keystore", "build_work/debug.keystore",
+              "-storepass", "android", "-keypass", "android",
+              "-alias", "androiddebugkey",
+              "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
+              "-dname", "CN=Android Debug,O=Android,C=US"
+          ], check=True)
+          out_apk = "app/build/outputs/apk/debug/KALYVRA-TOOLS.apk"
+          subprocess.run([
+              apksigner, "sign",
+              "--ks", "build_work/debug.keystore",
+              "--ks-pass", "pass:android",
+              "--key-pass", "pass:android",
+              "--out", out_apk,
+              "build_work/aligned.apk"
+          ], check=True)
+          print("SUCCESS:", out_apk)
+          PYEOF
+          sed -i 's/^          //' make_apk.py
+          python3 make_apk.py
 
       - name: Upload APK Siap Install
         uses: actions/upload-artifact@v4
